@@ -3,9 +3,9 @@ import marshal
 import os
 import sys
 from array import array
+from datetime import date
 from bisect import bisect_left, bisect_right
 from itertools import compress
-from datetime import date
 
 INPUT_NAME = "requests.log"
 OUTPUT_NAME = "summary.txt"
@@ -37,34 +37,37 @@ class WorkerFailed(Exception):
 # --------------------------------------------------------------------------- #
 
 def _ts_ok(t):
-    """Check the complete UTC timestamp shape and calendar/time ranges.
+    """Return whether t has the complete UTC timestamp format used by fast path.
 
-    The fast path intentionally accepts only the Z form; timestamps with
-    numeric offsets are handled by the reference parser.
+    The reference parser also accepts numeric UTC offsets; those timestamps
+    deliberately use the fallback because the fast path groups by the literal
+    hour prefix.
     """
     if not 22 <= len(t) <= 27 or t[-1:] != b"Z":
         return False
     if (t[4:5] != b"-" or t[7:8] != b"-" or t[10:11] != b"T"
             or t[13:14] != b":" or t[16:17] != b":" or t[19:20] != b"."):
         return False
-    if not (t[:4] + t[5:7] + t[8:10] + t[11:13] + t[14:16]
-            + t[17:19] + t[20:-1]).isdigit():
+    fraction = t[20:-1]
+    if not 1 <= len(fraction) <= 6:
         return False
-    if not 1 <= len(t[20:-1]) <= 6:
+    digits = (t[:4] + t[5:7] + t[8:10] + t[11:13] + t[14:16]
+              + t[17:19] + fraction)
+    if not digits.isdigit():
         return False
     try:
-        date(int(t[:4]), int(t[5:7]), int(t[8:10]))
+        year, month, day = int(t[:4]), int(t[5:7]), int(t[8:10])
+        hour, minute, second = int(t[11:13]), int(t[14:16]), int(t[17:19])
+        date(year, month, day)
     except ValueError:
         return False
-    hour, minute, second = int(t[11:13]), int(t[14:16]), int(t[17:19])
     return hour < 24 and minute < 60 and second < 60
 
 
 def _count_errors(eps, sts, m):
     """Return {endpoint: number of 5xx} for one hour-segment of m lines."""
     js = b"".join(sts)
-    if len(js) == 3 * m and all(s.isdigit() for s in sts):
-        # Three ASCII digits permit the first-digit shortcut safely.
+    if len(js) == 3 * m:                       # every status is exactly 3 bytes
         first = js[0::3]
         c = first.count(b"5")
         if not c:
@@ -90,7 +93,3 @@ def _count_errors(eps, sts, m):
         for e in compress(eps, sel):
             errs[e] = get(e, 0) + 1
     return errs
-
-
-def _add_segment(h, eps, sts, lats, acc):
-    """All lines share the hour label h."""
